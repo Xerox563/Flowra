@@ -453,8 +453,8 @@ def synthesize_node(state: AgentState) -> AgentState:
             joined = "\n\n".join(f"- {s}" for s in summaries) or "(no results)"
             prompt = (
                 "Using the following gathered summaries, write a coherent, well-structured "
-                "final report that answers the user's goal. Include headings where useful "
-                "and cite key points.\n\n"
+                "final report that answers the user's goal. Include headings, clear structure, "
+                "and cite key points. Aim for roughly 500 words minimum.\n\n"
                 f"User goal: {goal}\n\nSummaries:\n{joined[:12000]}"
             )
             resp = llm.invoke(prompt)
