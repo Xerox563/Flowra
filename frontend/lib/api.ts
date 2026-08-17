@@ -45,6 +45,24 @@ export interface TaskDetailResponse {
   steps: TaskStepResponse[];
 }
 
+export interface TaskListItem {
+  id: string;
+  trace_id: string;
+  goal: string;
+  status: string;
+  total_tokens: number;
+  total_cost_usd: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TaskListResponse {
+  items: TaskListItem[];
+  total: number;
+  page: number;
+  per_page: number;
+}
+
 export interface StreamEvent {
   step: string;
   status: string;
