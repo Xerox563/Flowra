@@ -395,7 +395,7 @@ def summarize_node(state: AgentState) -> AgentState:
     latency_ms = int((time.time() - start) * 1000)
     tokens = total_in + total_out
     cost = _estimate_cost(total_in, total_out)
-    output_str = json.dumps(summaries)[:50000]
+    output_str = json.dumps(summaries, ensure_ascii=False)[:50000]
 
     logger.info(
         "summarize node completed",
