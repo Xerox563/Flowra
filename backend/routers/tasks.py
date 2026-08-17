@@ -7,6 +7,7 @@ from backend.core.logging import get_logger
 from backend.core.tracing import get_trace_id
 from backend.models.task import Task
 from backend.schemas.task import TaskCreateRequest, TaskResponse, TaskDetailResponse
+from backend.services import queue
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 logger = get_logger(__name__)
@@ -32,6 +33,8 @@ def create_task(
     db.add(task)
     db.commit()
     db.refresh(task)
+
+    queue.publish_message(str(task.id), task.goal, trace_id)
 
     logger.info(
         "task created",
