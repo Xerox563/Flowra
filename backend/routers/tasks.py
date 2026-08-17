@@ -1,25 +1,38 @@
-from fastapi import APIRouter, Depends, HTTPException, Header
+from fastapi import APIRouter, Depends, HTTPException, Header, Response
 from sqlalchemy.orm import Session
 from typing import Optional
 
 from backend.core.database import get_db
 from backend.core.logging import get_logger
-from backend.core.tracing import get_trace_id
+from backend.core.tracing import get_trace_id, set_trace_id
 from backend.models.task import Task
 from backend.schemas.task import TaskCreateRequest, TaskResponse, TaskDetailResponse
-from backend.services import queue
+from backend.services import queue, idempotency as idempotency_service
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 logger = get_logger(__name__)
 
 
-@router.post("", response_model=TaskResponse, status_code=201)
+@router.post("", response_model=TaskResponse)
 def create_task(
+    response: Response,
     request: TaskCreateRequest,
     db: Session = Depends(get_db),
     idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
 ):
     trace_id = get_trace_id()
+
+    existing_task_id = idempotency_service.check_idempotency(idempotency_key)
+    if existing_task_id:
+        existing = db.query(Task).filter(Task.id == existing_task_id).first()
+        if existing:
+            response.status_code = 200
+            if existing.trace_id:
+                set_trace_id(existing.trace_id)
+            return TaskResponse(
+                task_id=existing.id, trace_id=existing.trace_id, status=existing.status
+            )
+
     logger.info(
         "creating task",
         extra={"trace_id": trace_id, "goal": request.goal},
@@ -35,6 +48,7 @@ def create_task(
     db.refresh(task)
 
     queue.publish_message(str(task.id), task.goal, trace_id)
+    idempotency_service.store_idempotency(idempotency_key, str(task.id))
 
     logger.info(
         "task created",
@@ -45,6 +59,7 @@ def create_task(
         },
     )
 
+    response.status_code = 201
     return TaskResponse(task_id=task.id, trace_id=task.trace_id, status=task.status)
 
 
