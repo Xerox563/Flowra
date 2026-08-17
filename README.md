@@ -1,291 +1,107 @@
 # AgentFlow
 
-> **Production-grade AI task execution platform.** Give the agent a goal in plain English — it plans, searches the web, asks for your approval on sensitive steps, summarizes, and synthesizes a polished final report. Every step is streamed to the frontend in real time with full cost, token, and latency observability.
+A real SaaS-grade AI task runner. You give it a goal in plain English, it figures out a plan, searches the web, asks you before doing anything sketchy, then summarizes everything and hands you a polished report. Every single step hits your dashboard in real time with costs and timing.
 
 ---
 
-## 1. About
+## What This Is
 
-AgentFlow is a distributed agentic system built with the same primitives you would see in a real SaaS product — async queueing, dead-letter queues, idempotent APIs, Redis-backed state, structured JSON logging, trace IDs per request, LangGraph orchestration, and human-in-the-loop approvals.
+AgentFlow is a working example of what production agentic systems actually look like. Not a notebook experiment. Not a toy. This is the kind of thing you'd run on real servers with real users hitting it.
 
-It is intentionally small (a single FastAPI backend + a standalone SQS worker + a Next.js 14 dashboard) but every subsystem follows production conventions. It is designed to be directly deployable to EC2/RDS/ElastiCache and horizontally scalable: the worker is a standalone process, so you can run N consumer processes against the same SQS queue.
+It's intentionally small: just a Python FastAPI backend, a separate worker process for the heavy lifting, and a Next.js dashboard. But inside those three parts, you'll find the same patterns you see in production SaaS. Async job queues. Retry logic that actually works. State stored in Redis. Idempotent APIs. Every request gets a trace ID so you can debug later.
 
----
-
-## 2. The Problem It Solves
-
-Running a one-off GPT call in a Jupyter notebook is easy. Running a reliable, observable, approval-gated **agentic workflow** in production that 100 users can submit to simultaneously — that is where things break:
-
-| Pain Point | Typical Failure |
-|---|---|
-| **Duplicate work on double-click / spotty Wi-Fi** | Same goal runs twice, burns 2x tokens, 2x cost. |
-| **Crash in the middle of an agent run** | Partially computed task is lost, state is unclear. |
-| **Agents taking external actions silently** | Agent calls an external URL / tool without user consent — trust is broken. |
-| **No per-step observability** | "It's slow" — you can't tell which node, how many tokens, or how much USD was spent. |
-| **Bursty traffic overwhelms the API process** | Worker work happens inside the request handler → timeouts and cascading failure. |
-| **Failed tasks are just "gone"** | No retry mechanism, no dead-letter queue for triage. |
-| **Mixed log formats (print() / console.log())** | Impossible to grep or build dashboards over. |
-
-AgentFlow is a minimal reference implementation that solves **every one** of these problems with off-the-shelf infrastructure.
+The whole thing scales horizontally. Throw more worker processes at the SQS queue and you handle more tasks. The API server is stateless. Run it on EC2 or Kubernetes — doesn't matter.
 
 ---
 
-## 3. The Solution (How It Works)
+## Why This Matters
 
-1. **Idempotent submission.** Every `POST /tasks` call is required to carry an `Idempotency-Key` header. The key is checked against Redis **before** any DB write or queue publish. Re-submits within 24 hours return the *same* task id (HTTP 200, not 201).
+Running a GPT call in Jupyter is trivial. Running something 100 people can submit to at the same time, with retries that actually work, approval gates, proper error handling, and full visibility into what's happening? That's where things fall apart.
 
-2. **Async execution via queue.** The FastAPI process never runs LLM work. It inserts a `QUEUED` row into Postgres, publishes a message to AWS SQS, and returns immediately. A **separate consumer process** (run as its own systemd unit or container) long-polls SQS.
+Here's what usually breaks:
 
-3. **Failure & DLQ semantics.** The consumer deletes a queue message **only after successful execution**. If the agent throws, the message is not deleted → SQS retries up to `Max Receive Count = 3`. On the 4th failure, SQS moves the message to the **Dead Letter Queue** automatically.
+- You hit submit twice by accident or your internet drops mid-upload. The same task runs twice. Double the tokens. Double the cost. **There's no idempotency check.**
+- The agent is halfway through a task when something crashes. The state is corrupted. You don't know what happened. **There's no recovery.**
+- The agent decides to call some external API without asking you first. It's doing stuff you didn't authorize. **You've lost control.**
+- Something feels slow but you can't tell why. Which step? How many tokens? How much did this cost in USD? **There's no insight.**
+- Traffic spikes. Everything hits the API server at once. It can't keep up. Everything times out and dies. **There's no backpressure.**
+- A task fails. It's just gone. Lost forever. No way to retry it or figure out what went wrong. **There's no dead-letter queue.**
+- Everyone logs things differently. `print()` in Python. `console.log()` in JavaScript. `grep` doesn't work. You can't build dashboards. **It's a mess.**
 
-4. **Human-in-the-loop approval.** Before summarizing external search results, the agent explicitly sets `approval:{task_id} = PENDING` in Redis and **blocks polling** every 2 seconds. A modal appears in the dashboard. The user calls `POST /tasks/{id}/approve` → Redis flips to `APPROVED`/`REJECTED` → the agent either continues or aborts.
-
-5. **Streaming UI.** `GET /tasks/{id}/stream` is a text/event-stream SSE endpoint that tails `task_events:{task_id}` in Redis every second. Every node writes RUNNING + COMPLETED events with `latency_ms`, `tokens`, and `cost_usd`. The browser StepTimeline re-renders instantly, no refresh needed.
-
-6. **Per-node cost & latency tracking.** Every GPT-4o call tracks input + output tokens and applies a published `$/token` rate. All numbers are written to PostgreSQL's `task_steps` table and to structured JSON logs (tagged with `trace_id`).
-
----
-
-## 4. Features
-
-- ✅ **LangGraph agent graph**: `PLAN → SEARCH → APPROVAL → SUMMARIZE → SYNTHESIZE`
-- ✅ **GPT-4o** for planning, summarization, and synthesis (with fallback stubs if API key is missing — great for local UI/dev work)
-- ✅ **Tavily web search** with tenacity retry (3 attempts + exponential backoff)
-- ✅ **Human-in-the-loop** approve / reject gate before summarization step
-- ✅ **Real-time SSE streaming** step timeline with keepalive pings every 15s
-- ✅ **PostgreSQL persistence** for tasks + per-step audit rows (latency, tokens, cost, output)
-- ✅ **AWS SQS** for task queueing + separate **DLQ** (max receives = 3, visibility timeout = 300s)
-- ✅ **Redis** for idempotency keys (24h TTL), task state (48h TTL), approval flags (1h TTL), and event streams
-- ✅ **Idempotent POST /tasks** — safe for double-submits and spotty clients
-- ✅ **Structured JSON logger** with `trace_id`, `task_id`, `step`, `latency_ms`, `tokens_used`, `cost_usd` on every line
-- ✅ **FastAPI + Pydantic** request/response validation
-- ✅ **Alembic** migrations
-- ✅ **Next.js 14 App Router + Tailwind CSS** dashboard:
-  - Home: goal form with 3 clickable example prompts
-  - Task view: live step timeline + SSE stream + approval modal + final report pane
-  - Dashboard: 4 KPI cards (total USD, tokens, completed, in-flight), paginated task history table
+AgentFlow fixes all of this with nothing fancy. Just boring, proven infrastructure.
 
 ---
 
-## 5. Architecture
+## How It Actually Works
 
-### 5.1 System Architecture
+### Stopping Duplicates
 
-```mermaid
-flowchart LR
-    subgraph User["🧑‍💻 User Browser"]
-        UI[Next.js 14 + Tailwind]
-    end
+Every time you submit a goal, your request includes an `Idempotency-Key` header. It's a unique ID. The API checks Redis for that key before it does anything else. If it's there, it means you already submitted this exact thing. It just gives you back the task ID from before. No duplicate work. No double cost. This works even if you're on a flaky connection and hit submit three times.
 
-    subgraph Edge["🌐 Edge / HTTP"]
-        LB[CORS / Nginx]
-    end
+### Jobs Don't Run Inside the API
 
-    subgraph API["⚡ FastAPI Backend (stateless, horizontal scale)"]
-        POST[POST /tasks]
-        STREAM[GET /tasks/{id}/stream SSE]
-        APPROVE[POST /tasks/{id}/approve]
-        GET_TASK[GET /tasks + /{id}]
-        HEALTH[GET /health /ready]
-    end
+The FastAPI server doesn't run the agent. It just creates a database row that says "task queued" and throws a message on an SQS queue. Then it immediately responds. Done. The actual work happens in a separate worker process that pulls jobs off the queue one at a time.
 
-    subgraph State["💾 State & Cache Layer"]
-        direction LR
-        REDIS[(Redis\nidempotency • task_state • approval • events)]
-        PG[(PostgreSQL\n tasks • task_steps)]
-    end
+This matters because it means the API server never gets blocked. It can handle 10,000 requests per second while the workers chew through the heavy LLM calls in the background.
 
-    subgraph Queue["📬 Async Queue"]
-        SQS[(AWS SQS\n agentflow-tasks)]
-        DLQ[(AWS SQS DLQ\n agentflow-tasks-dlq)]
-        SQS -- "3x fails →" --> DLQ
-    end
+### What Happens When Something Breaks
 
-    subgraph Worker["🧠 N × SQS Worker Processes (stateless, horizontal scale)"]
-        CONSUMER[SQS consumer long-poll]
-        GRAPH[LangGraph Agent]
-        LLM[GPT-4o]
-        SEARCH[Tavily Search API]
-    end
+The worker pulls a task off SQS. While it's working, that message is hidden from other workers (SQS calls this "visibility timeout"). If the worker finishes, it deletes the message. Job done.
 
-    UI -->|"1. Submit goal\n (POST /tasks, Idempotency-Key)"| LB --> POST
-    POST -->|"2. Redis idempotency check"| REDIS
-    POST -->|"3. Insert QUEUED"| PG
-    POST -->|"4. Publish {task_id, goal, trace_id}"| SQS
+But if something breaks — the worker crashes, or the process gets killed? The message becomes visible again. Another worker will pick it up and try again. By default, a message gets three attempts. If all three fail, SQS automatically moves it to a Dead Letter Queue. Someone can look at the DLQ later and figure out what went wrong without the bad messages clogging up the main queue.
 
-    CONSUMER -->|"5. Long poll every 20s, VisibilityTimeout=300s"| SQS
-    CONSUMER --> GRAPH
-    GRAPH -->|plan / summarize / synthesize| LLM
-    GRAPH -->|search| SEARCH
-    GRAPH -->|"Write RUNNING + COMPLETED rows\nUpdate totals"| PG
-    GRAPH -->|"Publish step events + state"| REDIS
-    GRAPH -->|"Approval gate: set PENDING, poll every 2s"| REDIS
+### Asking Permission Before Acting
 
-    UI -->|"6. Open SSE connection"| LB --> STREAM -->|"tail task_events Redis key / 1s"| REDIS
-    UI -->|"7. Click Approve"| LB --> APPROVE -->|"SET approval:{id}=APPROVED/REJECTED"| REDIS
+The agent has a step where it needs human approval. Before it does anything, it sets a Redis key that says "waiting for approval" and starts polling every two seconds.
 
-    GRAPH -->|"On success: delete message from SQS"| SQS
-    GET_TASK --> PG
-    HEALTH --> PG & REDIS & SQS
-```
+Meanwhile, your dashboard sees this and pops up a modal. You can approve or reject. Click approve? Redis gets updated. The agent sees the change on its next poll and keeps going. The whole thing is super snappy because we're not making HTTP calls back and forth.
 
-### 5.2 LangGraph Agent Flow (per-task node graph)
+### Real-Time Dashboard Updates
 
-```mermaid
-flowchart TD
-    START([START]) --> PLAN
-    PLAN["PLAN\nGPT-4o breaks goal\ninto 3-5 sub-questions"] --> SEARCH
-    SEARCH["SEARCH\nTavily per plan item\n(max_results=3)"] --> APPROVAL
-    APPROVAL["APPROVAL\nRedis approval:{id}=PENDING\nPoll every 2s, 30m timeout"] --> APPROVED?{Decision?}
-    APPROVED? -->|APPROVED| SUMMARIZE
-    APPROVED? -->|REJECTED or TIMEOUT| FAIL([Task FAILED])
-    SUMMARIZE["SUMMARIZE\nGPT-4o per result\n(2-3 sentences each)"] --> SYNTHESIZE
-    SYNTHESIZE["SYNTHESIZE\nGPT-4o final report\n≥ 500 words, structured"] --> DONE([Task COMPLETED])
+When the worker completes a step, it writes an event to Redis and a row to the database. The frontend opens a Server-Sent Events connection — which is just the browser hanging on to an HTTP connection and waiting for the server to push data.
 
-    style PLAN fill:#e0f2fe,stroke:#0369a1
-    style SEARCH fill:#ede9fe,stroke:#6d28d9
-    style APPROVAL fill:#fef3c7,stroke:#b45309
-    style SUMMARIZE fill:#dcfce7,stroke:#15803d
-    style SYNTHESIZE fill:#fce7f3,stroke:#be185d
-    style DONE fill:#16a34a,stroke:#064e3b,color:#fff
-    style FAIL fill:#dc2626,stroke:#7f1d1d,color:#fff
-```
+Every second, the API checks Redis for new events and sends them down. The dashboard updates instantly. You see the step turn green. You see how many tokens it used. You see how much it cost in USD. No polling. No refresh button. Just real time.
 
-### 5.3 End-to-End Request Sequence
+### Tracking Costs and Time
 
-```mermaid
-sequenceDiagram
-    actor User
-    participant Next as Next.js Frontend
-    participant API as FastAPI /tasks
-    participant Redis
-    participant PG as PostgreSQL
-    participant SQS
-    participant Worker as SQS Worker + LangGraph
-    participant Tavily
-    participant GPT as GPT-4o
+Every time the agent calls GPT-4o, we track how many input tokens, how many output tokens, and the latency. We do the math with the published OpenAI rates and calculate the USD cost. All of that goes into the database and also into structured JSON logs with a trace ID so you can connect the dots later.
 
-    Note over User,Next: 1. Submit goal (auto Idempotency-Key)
-    User->>Next: Fill form, Submit
-    Next->>API: POST /tasks {goal} + Idempotency-Key
-    API->>Redis: GET idempotent:{key}
-    Redis-->>API: (miss — first time)
-    API->>PG: INSERT tasks (QUEUED)
-    API->>SQS: Publish {task_id, goal, trace_id}
-    API->>Redis: SET idempotent:{key} = task_id EX 86400
-    API-->>Next: 201 Created {task_id, status: "QUEUED"}
-    Next-->>User: Redirect to /tasks/{id}
-
-    Note over Next,Redis: 2. Open live SSE stream
-    Next->>API: GET /tasks/{id}/stream text/event-stream
-    loop every 1s
-        API->>Redis: LRANGE / GET task_events, task_state
-        Redis-->>API: events
-        API-->>Next: data: {"step":"PLAN","status":"RUNNING"}
-    end
-
-    Note over Worker,GPT: 3. Worker picks up
-    Worker->>SQS: ReceiveMessage long poll (20s)
-    SQS-->>Worker: message + ReceiptHandle (visibility 300s)
-    Worker->>GPT: PLAN prompt → 3-5 sub-questions
-    GPT-->>Worker: plan JSON
-    Worker->>PG: INSERT task_steps (PLAN, COMPLETED, latency/tokens/cost)
-    Worker->>Redis: append event, update task_state
-
-    Worker->>Tavily: search(plan_item_1..N, max_results=3)
-    Tavily-->>Worker: results[]
-    Worker->>PG: INSERT task_steps (SEARCH, COMPLETED)
-    Worker->>Redis: append event
-
-    Note over Worker,Next: 4. Human approval gate
-    Worker->>Redis: SET approval:{id}=PENDING EX 3600
-    Worker->>PG: UPDATE tasks status=AWAITING_APPROVAL
-    Next-->>User: 🔔 ApprovalModal appears
-    User->>Next: Click "Approve"
-    Next->>API: POST /tasks/{id}/approve {decision:"approve"}
-    API->>Redis: SET approval:{id}=APPROVED
-    loop every 2s
-        Worker->>Redis: GET approval:{id}
-    end
-    Redis-->>Worker: APPROVED!
-    Worker->>Next: approval event → modal closes
-
-    Worker->>GPT: SUMMARIZE each search result
-    GPT-->>Worker: summaries[]
-    Worker->>PG: INSERT task_steps (SUMMARIZE, tokens/cost)
-    Worker->>Redis: append event
-
-    Worker->>GPT: SYNTHESIZE final report
-    GPT-->>Worker: report text
-    Worker->>PG: UPDATE task (COMPLETED, result, totals)
-    Worker->>Redis: append event, task_state=COMPLETED
-    Worker->>SQS: DeleteMessage ReceiptHandle ✅
-
-    Note over Next,User: 5. Final report streamed in
-    Next-->>User: Final report appears, timeline all green ✓
-```
-
-### 5.4 Redis Keyspace
-
-```mermaid
-flowchart LR
-    subgraph Redis
-        direction TB
-        A["idempotent:{idempotency_key}  → task_id  (TTL 24h)"]
-        B["task_state:{task_id}       → JSON {status, last_event, totals}  (TTL 48h)"]
-        C["task_events:{task_id}      → JSON array of StreamEvents  (TTL 48h)"]
-        D["approval:{task_id}        → PENDING | APPROVED | REJECTED  (TTL 1h)"]
-    end
-```
-
-### 5.5 Database Schema
-
-```mermaid
-erDiagram
-    tasks {
-        uuid id PK
-        varchar trace_id UK
-        text goal
-        varchar status "QUEUED|RUNNING|AWAITING_APPROVAL|COMPLETED|FAILED"
-        text result
-        int total_tokens DEFAULT 0
-        float total_cost_usd DEFAULT 0.0
-        datetime created_at
-        datetime updated_at
-    }
-
-    task_steps {
-        uuid id PK
-        uuid task_id FK
-        varchar step_name "PLAN|SEARCH|APPROVAL|SUMMARIZE|SYNTHESIZE"
-        varchar status "RUNNING|COMPLETED|FAILED|APPROVED|REJECTED|AWAITING_APPROVAL"
-        int latency_ms
-        int tokens_used
-        float cost_usd
-        text output
-        datetime created_at
-    }
-
-    tasks ||--o{ task_steps : "has many"
-```
+At the end, you can see the total time, total tokens, and total cost for the entire task. And you can see the breakdown by step.
 
 ---
 
-## 6. Project Structure
+## What's Included
+
+- The agent works like this: **plan out what to research**, **search for it on the web**, **pause for approval**, **summarize the results**, **write a final report**. Five steps.
+- GPT-4o handles the planning, summarizing, and report writing. If the API key isn't set up, it uses stub responses so you can still test the UI locally.
+- Web search uses Tavily. If something fails, it retries up to three times with backoff. Eventually gives up and moves on.
+- Human approval is built in. The agent stops and asks before summarizing.
+- Real-time updates. Everything flows to your dashboard as a stream. Keepalive pings every 15 seconds so the connection doesn't die.
+- Data lives in Postgres. Every task, every step, every token count, every cost. All persisted.
+- SQS handles the queue. DLQ handles failures. Visibility timeout is five minutes so workers have time to finish without getting their messages stolen.
+- Redis backs everything. Idempotency keys, task state, approval flags, event streams.
+- Double-clicking is safe. The idempotency check prevents duplicates.
+- The API validates everything with Pydantic and FastAPI's request/response types.
+- Database migrations are handled by Alembic.
+- The dashboard is built with Next.js 14 App Router and Tailwind. Goal form on the home page. Live task view with timeline, approve button, and final report. Dashboard page with four KPI cards (total USD spent, tokens used, completed tasks, in-flight tasks) and a paginated history table.
+
+---
+
+## How It's Organized
 
 ```
 agentflow/
 ├── frontend/                         # Next.js 14 App Router (TypeScript)
 │   ├── app/
 │   │   ├── layout.tsx                # Top nav + global Tailwind shell
-│   │   ├── page.tsx                  # Landing = GoalInput (home /)
-│   │   ├── tasks/[id]/page.tsx       # Live task view + SSE stream
-│   │   ├── dashboard/page.tsx        # History + KPI cards + cost totals
-│   │   └── globals.css
+│   │   ├── page.tsx                  # Goal input form (home /)
+│   │   ├── tasks/[id]/page.tsx       # Live task view (SSE)
+│   │   ├── dashboard/page.tsx        # History table + KPI cards
+│   │   └── globals.css               # Tailwind directives
 │   ├── components/
-│   │   ├── GoalInput.tsx             # Goal textarea + examples + submit
+│   │   ├── GoalInput.tsx             # Textarea + examples + submit
 │   │   ├── StepTimeline.tsx          # 5-step pipeline visualizer
-│   │   ├── ApprovalModal.tsx         # Approve/Reject dialog
+│   │   ├── ApprovalModal.tsx         # Approve / reject dialog
 │   │   └── CostBadge.tsx             # Tokens + USD micro pill
 │   └── lib/
 │       ├── api.ts                    # axios + typed interfaces + UUID idempotency
@@ -304,8 +120,8 @@ agentflow/
 │   │   └── idempotency.py            # check_idempotency, store_idempotency
 │   ├── worker/
 │   │   ├── consumer.py               # SQS long-poll loop; delete on success only
-│   │   ├── agent.py                  # LangGraph graph: plan/search/approval/summarize/synthesize
-│   │   └── tools.py                  # Tavily search (tenacity 3x retry)
+│   │   ├── agent.py                  # LangGraph: plan/search/approval/summarize/synthesize
+│   │   └── tools.py                  # Tavily search (tenacity 3× retry)
 │   ├── models/
 │   │   └── task.py                   # SQLAlchemy Task + TaskStep
 │   ├── schemas/
@@ -315,8 +131,7 @@ agentflow/
 │   │   ├── database.py               # SQLAlchemy engine / SessionLocal / get_db
 │   │   ├── logging.py                # Structured JSON logger
 │   │   └── tracing.py                # Per-request trace_id contextvar
-│   ├── alembic/
-│   ├── alembic.ini
+│   ├── alembic/                      # Migrations
 │   └── requirements.txt
 │
 └── infra/
@@ -325,102 +140,20 @@ agentflow/
 
 ---
 
-## 7. Stack
+## The Technology Stack
 
-| Layer | Tech |
-|---|---|
-| Frontend | Next.js 14 (App Router) + Tailwind CSS + TypeScript |
-| Backend API | FastAPI (Python 3.11+) |
-| Agent Engine | LangGraph `StateGraph` |
-| LLM | OpenAI GPT-4o via `langchain-openai` |
-| Web Search | Tavily API (with 3× retry / exponential backoff) |
-| Async Queue | AWS SQS (Main queue) + separate DLQ (max receives = 3, visibility 300 s) |
-| Cache / State / Lock | Redis (idempotency keys, task_state, event stream, approval flag) |
-| Database | PostgreSQL 15 (tasks + task_steps, SQLAlchemy + Alembic migrations) |
-| Auth (Phase 6) | JWT access + refresh tokens (python-jose / passlib-bcrypt) |
-| Observability | Structured JSON logs (trace_id + task_id + step on every line) |
-| Deployment | Designed for: AWS EC2 + RDS (PostgreSQL) + ElastiCache (Redis) |
-| CI/CD (Phase 6) | GitHub Actions → deploy to EC2 over SSH |
-
----
-
-## 8. API Endpoints
-
-```
-POST   /tasks                    Submit a new goal (Idempotency-Key header required)
-GET    /tasks                    Paginated list of all tasks
-GET    /tasks/{id}               Task detail + its steps
-GET    /tasks/{id}/stream        Server-Sent Events stream of live step updates
-POST   /tasks/{id}/approve       Approve/reject a paused approval step
-GET    /health                   Liveness  → {"status": "ok"}
-GET    /ready                    Readiness → DB + Redis ping
-```
-
-### `POST /tasks`
-
-**Headers**
-```
-Idempotency-Key: <uuid>        (required — prevents duplicates)
-```
-
-**Body**
-```json
-{ "goal": "Research impact of LLMs on SaaS pricing and write a 500-word report" }
-```
-
-**Response (201 Created on first submit, 200 OK on resubmit)**
-```json
-{
-  "task_id": "b52e6622-2e2e-4d7a-88de-0d8d4c57a6a0",
-  "trace_id": "trace-a1b2c3",
-  "status": "QUEUED"
-}
-```
-
-### `GET /tasks/{id}/stream` (SSE)
-
-Streams newline-delimited JSON events:
-```
-data: {"step": "PLAN", "status": "COMPLETED", "latency_ms": 820, "tokens": 210, "cost_usd": 0.0012}
-data: {"step": "SEARCH", "status": "RUNNING"}
-data: {"step": "APPROVAL", "status": "AWAITING_APPROVAL", "message": "Agent wants to access external URLs. Approve?"}
-data: {"step": "SYNTHESIZE", "status": "COMPLETED", "result": "Final report text here..."}
-data: {"type": "keepalive", "timestamp": 1749999999}
-```
-
-### `POST /tasks/{id}/approve`
-
-**Body**
-```json
-{ "decision": "approve" }   // or "reject"
-```
-
-**Response**
-```json
-{ "task_id": "b52e…", "decision": "APPROVED" }
-```
+| Layer             | Tech                                                            |
+| ----------------- | --------------------------------------------------------------- |
+| Frontend          | Next.js 14 (App Router) + Tailwind CSS + TypeScript             |
+| Backend API       | FastAPI (Python 3.11+)                                          |
+| Agent Engine      | LangGraph `StateGraph`                                          |
+| LLM               | OpenAI GPT-4o via `langchain-openai`                            |
+| Web Search        | Tavily API (3× retry, exponential backoff)                      |
+| Async Queue       | AWS SQS (Main queue) + DLQ (max receives = 3, visibility 5 min) |
+| Cache / State     | Redis (idempotency keys, task_state, approval, event stream)    |
+| Database          | PostgreSQL 15 (SQLAlchemy ORM + Alembic migrations)             |
+| Observability     | Structured JSON logs — trace_id, task_id, step on every line    |
+| _(Phase 6)_ Auth  | JWT access + refresh tokens (python-jose / passlib-bcrypt)      |
+| _(Phase 6)_ CI/CD | GitHub Actions → SSH deploy to AWS EC2 + RDS + ElastiCache      |
 
 ---
-
-## 9. Commit Convention
-
-Every commit uses a prefix tag for simple, scanable history.
-
-```
-[ADD] goal input form with submit + loading state
-[ADD] POST /tasks endpoint with Redis idempotency check
-[ADD] LangGraph plan node with structured JSON logging
-[FIX] SSE connection dropping on long tasks — added keepalive ping
-[FIX] duplicate task created on double submit — idempotency key fix
-[FIX] agent stuck in approval loop — Redis TTL was too short
-```
-
----
-
-## 10. Resume Bullets
-
-Copy after project is 100% done for the Experience section:
-
-- Built **AgentFlow**, a production-grade agentic task platform using **LangGraph + GPT-4o**, with async execution via **AWS SQS**, DLQ-based 3-retry failure recovery, and **Redis-backed idempotent task submission** safe for double-clicks and flaky clients.
-- Implemented **human-in-the-loop approval flow** with real-time **SSE streaming** of per-step latency, token usage, and USD cost to a **Next.js 14** dashboard (goal form, live step timeline, approve/reject modal, cost KPIs, task history table).
-- Designed distributed worker architecture with **structured JSON logging** (trace IDs, per-node cost metrics), **PostgreSQL** step persistence, `SQLAlchemy` + `Alembic` migrations, and GitHub Actions CI/CD to AWS EC2 + RDS + ElastiCache.
