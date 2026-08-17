@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.routers import health, tasks
+from backend.routers import approve, health, stream, tasks
 from backend.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -22,6 +22,8 @@ app.add_middleware(
 
 app.include_router(health.router, tags=["health"])
 app.include_router(tasks.router)
+app.include_router(stream.router)
+app.include_router(approve.router)
 
 
 @app.on_event("startup")
