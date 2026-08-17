@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Header, Response
+from fastapi import APIRouter, Depends, HTTPException, Header, Response, Query
 from sqlalchemy.orm import Session
 from typing import Optional
 
@@ -6,11 +6,38 @@ from backend.core.database import get_db
 from backend.core.logging import get_logger
 from backend.core.tracing import get_trace_id, set_trace_id
 from backend.models.task import Task
-from backend.schemas.task import TaskCreateRequest, TaskResponse, TaskDetailResponse
+from backend.schemas.task import TaskCreateRequest, TaskListResponse, TaskResponse, TaskDetailResponse
 from backend.services import queue, idempotency as idempotency_service
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 logger = get_logger(__name__)
+
+
+@router.get("", response_model=TaskListResponse)
+def list_tasks(
+    db: Session = Depends(get_db),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(20, ge=1, le=100),
+):
+    trace_id = get_trace_id()
+    logger.info(
+        "listing tasks",
+        extra={"trace_id": trace_id, "page": page, "per_page": per_page},
+    )
+    total = db.query(Task).count()
+    tasks = (
+        db.query(Task)
+        .order_by(Task.created_at.desc())
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+        .all()
+    )
+    return TaskListResponse(
+        items=tasks,
+        total=total,
+        page=page,
+        per_page=per_page,
+    )
 
 
 @router.post("", response_model=TaskResponse)

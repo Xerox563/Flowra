@@ -32,6 +32,27 @@ class TaskStepResponse(BaseModel):
         from_attributes = True
 
 
+class TaskListItem(BaseModel):
+    id: UUID
+    trace_id: str
+    goal: str
+    status: str
+    total_tokens: int = 0
+    total_cost_usd: float = 0.0
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class TaskListResponse(BaseModel):
+    items: list[TaskListItem]
+    total: int
+    page: int
+    per_page: int
+
+
 class TaskDetailResponse(BaseModel):
     id: UUID
     trace_id: str
