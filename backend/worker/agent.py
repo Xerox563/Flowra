@@ -286,6 +286,7 @@ def approval_node(state: AgentState) -> AgentState:
 
     cache.set(approval_key, "PENDING", ttl_seconds=3600)
     _update_task_status(task_id, "AWAITING_APPROVAL")
+    cache.set_json(f"task_state:{task_id}", {"status": "AWAITING_APPROVAL", "approval_pending": True}, ttl_seconds=172800)
 
     logger.info(
         "approval node waiting for decision",
