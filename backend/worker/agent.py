@@ -529,7 +529,11 @@ def build_graph() -> StateGraph:
     graph.set_entry_point("plan")
     graph.add_edge("plan", "search")
     graph.add_edge("search", "approval")
-    graph.add_conditional_edges("approval", approval_conditional)
+    graph.add_conditional_edges(
+        "approval",
+        approval_conditional,
+        {"summarize": "summarize", END: END},
+    )
     graph.add_edge("summarize", "synthesize")
     graph.add_edge("synthesize", END)
 
