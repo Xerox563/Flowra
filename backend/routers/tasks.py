@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, HTTPException, Header
 from sqlalchemy.orm import Session
 from typing import Optional
 
@@ -6,7 +6,7 @@ from backend.core.database import get_db
 from backend.core.logging import get_logger
 from backend.core.tracing import get_trace_id
 from backend.models.task import Task
-from backend.schemas.task import TaskCreateRequest, TaskResponse
+from backend.schemas.task import TaskCreateRequest, TaskResponse, TaskDetailResponse
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 logger = get_logger(__name__)
@@ -43,3 +43,18 @@ def create_task(
     )
 
     return TaskResponse(task_id=task.id, trace_id=task.trace_id, status=task.status)
+
+
+@router.get("/{task_id}", response_model=TaskDetailResponse)
+def get_task(task_id: str, db: Session = Depends(get_db)):
+    trace_id = get_trace_id()
+    logger.info(
+        "fetching task",
+        extra={"trace_id": trace_id, "task_id": task_id},
+    )
+
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    return TaskDetailResponse.model_validate(task)
