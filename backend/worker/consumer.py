@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backend.services import queue
 from backend.core.logging import get_logger
+from backend.worker.agent import run_agent
 
 logger = get_logger(__name__)
 
@@ -24,7 +25,7 @@ def run_consumer():
                     goal = body.get("goal")
                     trace_id = body.get("trace_id")
                     logger.info(
-                        "received SQS message",
+                        "received SQS message running agent",
                         extra={
                             "trace_id": trace_id,
                             "task_id": task_id,
@@ -32,14 +33,24 @@ def run_consumer():
                             "message_id": message.get("MessageId"),
                         },
                     )
-                    print(
-                        f"[CONSUMER] task_id={task_id} trace_id={trace_id} goal={goal}"
+                    run_agent(task_id)
+                    logger.info(
+                        "agent completed deleting message",
+                        extra={
+                            "trace_id": trace_id,
+                            "task_id": task_id,
+                            "message_id": message.get("MessageId"),
+                        },
                     )
                     queue.delete_message(receipt_handle)
                 except Exception as inner:
                     logger.error(
-                        "error processing message not deleting",
-                        extra={"error": str(inner), "message_id": message.get("MessageId")},
+                        "error processing message will retry",
+                        extra={
+                            "error": str(inner),
+                            "message_id": message.get("MessageId"),
+                            "task_id": body.get("task_id") if "body" in locals() else None,
+                        },
                     )
         except KeyboardInterrupt:
             logger.info("consumer stopped by user")
