@@ -182,7 +182,7 @@ def plan_node(state: AgentState) -> AgentState:
 
     latency_ms = int((time.time() - start) * 1000)
     cost = _estimate_cost(tokens_in, tokens_out)
-    output_str = json.dumps(plan)
+    output_str = json.dumps(plan, ensure_ascii=False)
 
     logger.info(
         "plan node completed",
